@@ -1,0 +1,6 @@
+biopython
+plotly
+pandas
+scipy
+streamlit>=0.83.0
+watchdog
