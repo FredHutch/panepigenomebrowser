@@ -717,7 +717,7 @@ def format_display(plot_value_df, plot_text_df, motif_annot, user_inputs):
             x=plot_value_df.columns.values,
             y=plot_value_df.index.values,
             z=plot_value_df.values,
-            colorscale="blues",
+            colorscale=user_inputs["heatmap_cpal"],
             text=plot_text_df.values,
             hoverinfo="text"
         ),
@@ -731,7 +731,7 @@ def format_display(plot_value_df, plot_text_df, motif_annot, user_inputs):
             x=marginal_x,
             y=marginal_y,
             z=marginal_z,
-            colorscale="bluered",
+            colorscale=user_inputs["annot_cpal"],
             text=marginal_text,
             hoverinfo="text",
             showscale=False,
@@ -785,6 +785,16 @@ user_inputs = dict(
     annot_enzymes_by=st.sidebar.multiselect(
         "Annotate Enzymes By",
         motif_annot.columns.values
+    ),
+    heatmap_cpal=st.sidebar.selectbox(
+        "Heatmap Color Palette",
+        px.colors.named_colorscales(),
+        index=px.colors.named_colorscales().index("blues")
+    ),
+    annot_cpal=st.sidebar.selectbox(
+        "Annotation Color Palette",
+        px.colors.named_colorscales(),
+        index=px.colors.named_colorscales().index("bluered")
     ),
     figure_height=st.sidebar.slider(
         "Figure Height",
