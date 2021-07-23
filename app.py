@@ -13,6 +13,7 @@ from plotly import graph_objects as go
 from plotly.subplots import make_subplots
 from scipy import cluster
 import streamlit as st
+from zipfile import ZipFile
 
 
 ###############################
@@ -26,36 +27,124 @@ def read_data(
     # Populate a dictionary with the output
     output = defaultdict(dict)
 
+    # By default, there are no additional annotations for the motifs
+    addl_motif_annot = None
+
     # Walk the directory hierarchy
     for dirpath, dirnames, filenames in os.walk(dir_path):
 
         # Iterate over each file
         for filename in filenames:
 
-            # Instead of checking file extensions, we'll
-            # figure out the format based on the file contents
+            # If this is a CSV, then it may be the motif annotation table
+            if filename.endswith('.csv'):
 
-            # In contrast, the organism is determined by the extension
-            organism, filetype, data = parse_file(
-                os.path.join(dirpath, filename)
-            )
+                # Try to read it in
+                try:
+                    addl_motif_annot = pd.read_csv(
+                        os.path.join(dirpath, filename),
+                        index_col=0
+                    )
 
-            # If this filetype was not recognized
-            if filetype is None:
+                # If there are any errors parsing the file
+                except:
+                    # Just skip it
+                    continue
+            
+            # If this is a zip file
+            elif filename.endswith('.zip'):
 
-                # Skip it
-                continue
-                
-            # Otherwise
+                # Parse the contents
+                for organism, filetype, data in parse_zip(
+                    os.path.join(dirpath, filename)
+                ):
+
+                    # Add it to the data
+                    output[organism][filetype] = data
+
+            # Otherwise, if it is not a zip file
             else:
 
-                logging.info(f"Read in {filetype} for {organism}")
+                # Instead of checking file extensions, we'll
+                # figure out the format based on the file contents
 
-                # Add it to the data
-                output[organism][filetype] = data
+                # In contrast, the organism is determined by the extension
+                organism, filetype, data = parse_file(
+                    os.path.join(dirpath, filename)
+                )
 
-    # Return the dict of all data
-    return output
+                # If this filetype was not recognized
+                if filetype is None:
+
+                    # Skip it
+                    continue
+                    
+                # Otherwise
+                else:
+
+                    logging.info(f"Read in {filetype} for {organism}")
+
+                    # Add it to the data
+                    output[organism][filetype] = data
+
+    # Get all of the annotations per-motif which agree across
+    # all of the rebase files
+    motif_annot = pd.concat([
+        org_data['rebase'].drop(
+            columns=[
+                "org_name",
+                "org_num",
+                "percent_detected",
+                "coverage",
+                "comp_percent_detected",
+                "pb_comment",
+                "complete_genome",
+                "enz_comment",
+                "enz_name"
+            ]
+        )
+        for org, org_data in output.items()
+        if 'rebase' in org_data
+    ]).groupby(
+        "rec_seq"
+    ).apply(
+        lambda d: pd.DataFrame([{
+            col_name: col_values.dropna().unique()[0]
+            for col_name, col_values in d.items()
+            if col_values.dropna().unique().shape[0] == 1
+        }])
+    ).drop(
+        columns=["rec_seq"]
+    ).reset_index(
+    ).drop(
+        columns=["level_1"]
+    ).set_index("rec_seq")
+
+    # Now add in any additional annotations provided by the user
+    if addl_motif_annot is not None:
+        
+        # Iterate over the columns of data provided by the user
+        for col_name, col_values in addl_motif_annot.items():
+            
+            # Assign the values provided by the user to the rebase data
+            motif_annot = motif_annot.assign(
+                **{
+                    col_name: col_values
+                }
+            )
+
+    # Finally, reformat the index used to label the motif
+    # so that it includes both the enzyme type and subtype
+    # as indicated by the rebase data
+    motif_annot = motif_annot.rename(
+        index={
+            r['rec_seq']: format_enzyme_name(r)
+            for _, r in motif_annot.reset_index().iterrows()
+        }
+    )
+
+    # Return the dict of all data, along with the additional motif annotations, if any
+    return output, motif_annot
 
 
 @st.cache
@@ -111,6 +200,92 @@ def parse_file(filepath, ignored_ext=('.zip', '.sh', '.DS_Store', ".docx")):
 
                 # Catch the error and return none
                 return org_name, None, None
+
+    return parse_lines(org_name, lines)
+    
+@st.cache
+def parse_zip(archivepath, ignored_ext=('.zip', '.sh', '.DS_Store', ".docx")):
+    """Parse the contents of a zip archive."""
+
+    # Make sure that the file exists
+    assert os.path.exists(archivepath), f"Archive not found: {archivepath}"
+
+    # Set up a list of outputs
+    outputs = []
+
+    # Open the archive
+    logging.info(f"Reading {archivepath} archive")
+    with ZipFile(archivepath, 'r') as myzip:
+
+        # Iterate over each file in the archive
+        for filepath in myzip.namelist():
+            logging.info(f"Parsing {filepath} from archive")
+
+            # Parse the organism name from the filepath
+            org_name = parse_org_name(filepath)
+
+            # If the file is any ignored type
+            if filepath.endswith(ignored_ext):
+
+                # Skip it
+                continue
+
+            # If the file is gzip compressed
+            if filepath.endswith(".gz"):
+
+                # Open it with gzip
+                with gzip.open(
+                    myzip.open(filepath, 'r'),
+                    'rt'
+                ) as handle:
+
+                    # Try to
+                    try:
+
+                        # Read all of the contents
+                        lines = handle.readlines()
+
+                    # If the file is not unicode
+                    except UnicodeDecodeError:
+
+                        # Catch the error and skip it
+                        continue
+
+            # Otherwise
+            else:
+
+                # Open it as a text file
+                with myzip.open(filepath, 'r') as handle:
+
+                    # Try to
+                    try:
+
+                        # Read all of the contents
+                        lines = [
+                            line.decode("utf-8").rstrip("\r")
+                            for line in handle.readlines()
+                        ]
+
+                    # If the file is not unicode
+                    except UnicodeDecodeError:
+
+                        # Catch the error and skip it
+                        continue
+
+            # Parse the file
+            org_name, filetype, dat = parse_lines(org_name, lines)
+
+            # If the filetype was recognized
+            if filetype is not None:
+
+                # Add it to the list
+                outputs.append((org_name, filetype, dat))
+
+    # Return all of the data from the archive
+    return outputs
+
+def parse_lines(org_name, lines):
+    """Parse the contents of a file, formatted as a list of lines."""
 
     # Remove any empty header lines
     while len(lines) > 0:
@@ -286,7 +461,7 @@ def parse_org_name(filepath):
 def format_rebase_df(dirpath):
 
     # READ INPUT DATA FROM WORKING DIRECTORY
-    data = read_data(dirpath)
+    data, motif_annot = read_data(dirpath)
 
     # Make a DataFrame with the organism name added
     df = pd.concat(
@@ -339,7 +514,7 @@ def format_rebase_df(dirpath):
         columns=percent_detected.columns.values,
     )
 
-    return percent_detected, text_df
+    return percent_detected, text_df, motif_annot
 
 
 def format_enzyme_name(r):
@@ -425,31 +600,63 @@ def format_enzyme_type(enzyme_name_list):
         index=enzyme_name_list
     )
 
-def format_display(plot_value_df, plot_text_df, user_inputs):
+def format_display(plot_value_df, plot_text_df, motif_annot, user_inputs):
     """Format the display."""
 
-    # Format the enzyme type key
-    enzyme_type_df = format_enzyme_type(
+    # Format the enzyme type key, which includes both the nicely-formatted
+    # text describing the enzyme type and subtype, as well as a numeric
+    # index which helps provide a color assignment in the plot
+    enzyme_annot_df = format_enzyme_type(
         plot_value_df.columns.values
     )
 
-    # If the user has checked the box for "Sort Enzymes by Type"
-    if user_inputs["sort_by_enzyme_type"]:
+    # Combine that table with any of the additional motif annotations available
+    for col_name, col_values in motif_annot.items():
+        enzyme_annot_df = enzyme_annot_df.assign(
+            **{
+                col_name: col_values
+            }
+        )
 
-        # Sort the `enzyme_type_df`
-        enzyme_type_df.sort_values(
-            by="enzyme_type",
-            inplace=True,
-            ascending=False
+    # If the user wants to sort the enzymes by an annotation
+    if len(user_inputs["sort_enzymes_by"]) > 0:
+
+        # Sort the annotation table
+        enzyme_annot_df.sort_values(
+            by=user_inputs["sort_enzymes_by"],
+            inplace=True
         )
 
         # Reorder the display data to match
         plot_value_df = plot_value_df.reindex(
-            columns=enzyme_type_df.index.values
+            columns=enzyme_annot_df.index.values
         )
         plot_text_df = plot_text_df.reindex(
-            columns=enzyme_type_df.index.values
+            columns=enzyme_annot_df.index.values
         )
+
+    # Set up a list of columns to annotate enzymes by
+    marginal_z_columns = ["ix"] + user_inputs["annot_enzymes_by"]
+    marginal_text_columns = ["enzyme_type"] + user_inputs["annot_enzymes_by"]
+    marginal_labels = ["Enzyme Type"] + user_inputs["annot_enzymes_by"]
+
+    # Set up the annotations which will be displayed in the margin
+    marginal_text = enzyme_annot_df.reindex(columns=marginal_text_columns)
+
+    # For the colors, convert all values to numeric and scale to 0-1
+    marginal_z = enzyme_annot_df.reindex(
+        columns=marginal_z_columns
+    ).applymap(
+        lambda v: pd.to_numeric(v, errors="coerce")
+    ).apply(
+        lambda c: c - c.min() if pd.notnull(c.min()) else c
+    ).apply(
+        lambda c: c / c.max() if pd.notnull(c.max()) else c
+    )
+
+    # Set the fraction of the plot used for the marginal annotation
+    # depending on the number of those annotations
+    annot_frac = 0.02 + (0.05 * float(len(marginal_labels)))
 
     # If the genomes are being displayed on the horizontal axis
     if user_inputs['genome_axis'] == "Columns":
@@ -458,8 +665,8 @@ def format_display(plot_value_df, plot_text_df, user_inputs):
         nrows=1
         ncols=2
         domains=dict(
-            xaxis_domain=[0.11, 1.0],
-            xaxis2_domain=[0, 0.09],
+            xaxis_domain=[annot_frac + 0.01, 1.0],
+            xaxis2_domain=[0, annot_frac - 0.01],
             yaxis_domain=[0, 1.0],
             yaxis_anchor="x2"
         )
@@ -469,10 +676,10 @@ def format_display(plot_value_df, plot_text_df, user_inputs):
         plot_text_df = plot_text_df.T
 
         # The marginal annotation will be vertical
-        marginal_x = ["Enzyme Type"]
+        marginal_x = marginal_labels
         marginal_y = plot_value_df.index.values
-        marginal_z = enzyme_type_df.reindex(columns=["ix"]).values
-        marginal_text = enzyme_type_df.reindex(columns=["enzyme_type"]).values
+        marginal_z = marginal_z.values
+        marginal_text = marginal_text.values
 
     # Otherwise
     else:
@@ -484,8 +691,8 @@ def format_display(plot_value_df, plot_text_df, user_inputs):
         nrows=2
         ncols=1
         domains=dict(
-            yaxis_domain=[0.11, 1.0],
-            yaxis2_domain=[0, 0.09],
+            yaxis_domain=[annot_frac + 0.01, 1.0],
+            yaxis2_domain=[0, annot_frac - 0.01],
             xaxis_domain=[0, 1.0],
             xaxis_anchor="y2"
         )
@@ -494,9 +701,9 @@ def format_display(plot_value_df, plot_text_df, user_inputs):
 
         # The marginal annotation will be horizontal
         marginal_x = plot_value_df.columns.values
-        marginal_y = ["Enzyme Type"]
-        marginal_z = enzyme_type_df.reindex(columns=["ix"]).T.values
-        marginal_text = enzyme_type_df.reindex(columns=["enzyme_type"]).T.values
+        marginal_y = marginal_labels
+        marginal_z = marginal_z.T.values
+        marginal_text = marginal_text.T.values
 
     # Set up the figure
     fig = make_subplots(
@@ -551,7 +758,7 @@ def format_display(plot_value_df, plot_text_df, user_inputs):
 ####################
 
 # FORMAT THE REBASE DATA
-value_df, text_df = format_rebase_df(os.getcwd())
+value_df, text_df, motif_annot = format_rebase_df(os.getcwd())
 
 # TITLE OF THE APP
 st.title('Epi-Pangenome Map')
@@ -571,9 +778,13 @@ user_inputs = dict(
         ["Rows", "Columns"],
         index=0
     ),
-    sort_by_enzyme_type=st.sidebar.checkbox(
-        "Sort Enzymes by Type",
-        False
+    sort_enzymes_by=st.sidebar.multiselect(
+        "Sort Enzymes By",
+        motif_annot.columns.values
+    ),
+    annot_enzymes_by=st.sidebar.multiselect(
+        "Annotate Enzymes By",
+        motif_annot.columns.values
     ),
     figure_height=st.sidebar.slider(
         "Figure Height",
@@ -652,6 +863,7 @@ st.write(
     format_display(
         plot_value_df,
         plot_text_df,
+        motif_annot,
         user_inputs
     )
 )
