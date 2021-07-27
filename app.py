@@ -666,7 +666,7 @@ def format_display(plot_value_df, plot_text_df, motif_annot, genome_annot, user_
     # Otherwise, the annotations should be made to match the order of the genomes
     else:
         genome_annot_df = genome_annot.reindex(
-            columns=user_inputs["annot_genomes_by"],
+            columns=user_inputs["annot_genomes_by"] if len(user_inputs["annot_genomes_by"]) > 0 else ['none'],
             index=plot_value_df.index.values
         )
 
@@ -816,6 +816,7 @@ def format_display(plot_value_df, plot_text_df, motif_annot, genome_annot, user_
             text=bar_text,
             hoverinfo="text",
             orientation=bar_orientation,
+            marker_color="blue",
         ),
         row=nrows,
         col=ncols
