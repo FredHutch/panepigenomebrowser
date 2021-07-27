@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
 
+from Bio.Data.IUPACData import ambiguous_dna_values
+from Bio.Seq import Seq
 from Bio.SeqIO.FastaIO import SimpleFastaParser
 from Bio.SeqIO import parse as seqio_parse
 from collections import defaultdict
 import gzip
 from io import StringIO
+from itertools import product
 import logging
 import os
 import pandas as pd
 import plotly.express as px
 from plotly import graph_objects as go
 from plotly.subplots import make_subplots
+import re
 from scipy import cluster
 import streamlit as st
 from zipfile import ZipFile
@@ -19,6 +23,7 @@ from zipfile import ZipFile
 ###############################
 # DEFINE ALL HELPER FUNCTIONS #
 ###############################
+@st.cache
 def read_data(
     dir_path
 ):
@@ -27,8 +32,8 @@ def read_data(
     # Populate a dictionary with the output
     output = defaultdict(dict)
 
-    # By default, there are no additional annotations for the motifs
-    addl_motif_annot = None
+    # By default, there are no additional annotations for the motifs or genomes
+    addl_annots = []
 
     # Walk the directory hierarchy
     for dirpath, dirnames, filenames in os.walk(dir_path):
@@ -36,14 +41,16 @@ def read_data(
         # Iterate over each file
         for filename in filenames:
 
-            # If this is a CSV, then it may be the motif annotation table
+            # If this is a CSV, then it may be a motif or annotation table
             if filename.endswith('.csv'):
 
                 # Try to read it in
                 try:
-                    addl_motif_annot = pd.read_csv(
-                        os.path.join(dirpath, filename),
-                        index_col=0
+                    addl_annots.append(
+                        pd.read_csv(
+                            os.path.join(dirpath, filename),
+                            index_col=0
+                        )
                     )
 
                 # If there are any errors parsing the file
@@ -121,30 +128,56 @@ def read_data(
     ).set_index("rec_seq")
 
     # Now add in any additional annotations provided by the user
-    if addl_motif_annot is not None:
+    for df in addl_annots:
         
         # Iterate over the columns of data provided by the user
-        for col_name, col_values in addl_motif_annot.items():
+        for col_name, col_values in df.items():
+
+            # If any of the index labels from the annotation table
+            # match the motifs used in the analysis
+            if any([pd.notnull(col_values.get(i)) for i in motif_annot.index.values]):
             
-            # Assign the values provided by the user to the rebase data
-            motif_annot = motif_annot.assign(
-                **{
-                    col_name: col_values
-                }
-            )
+                # Assign the values provided by the user to the rebase data
+                motif_annot = motif_annot.assign(
+                    **{
+                        col_name: col_values
+                    }
+                )
 
     # Finally, reformat the index used to label the motif
     # so that it includes both the enzyme type and subtype
     # as indicated by the rebase data
-    motif_annot = motif_annot.rename(
-        index={
-            r['rec_seq']: format_enzyme_name(r)
-            for _, r in motif_annot.reset_index().iterrows()
-        }
+    motif_annot = motif_annot.assign(
+        type_label=motif_annot.apply(
+            format_enzyme_type_label,
+            axis=1
+        )
     )
 
+    # Make a DataFrame which can be used to populate annotations for the genomes
+    genome_annot = pd.DataFrame(
+        index=list(output.keys())
+    )
+
+    # Now add in any additional annotations provided by the user
+    for df in addl_annots:
+        
+        # Iterate over the columns of data provided by the user
+        for col_name, col_values in df.items():
+
+            # If any of the index labels from the annotation table
+            # match the motifs used in the analysis
+            if any([pd.notnull(col_values.get(i)) for i in genome_annot.index.values]):
+            
+                # Assign the values provided by the user to the rebase data
+                genome_annot = genome_annot.assign(
+                    **{
+                        col_name: col_values
+                    }
+                )
+
     # Return the dict of all data, along with the additional motif annotations, if any
-    return output, motif_annot
+    return output, motif_annot, genome_annot
 
 
 @st.cache
@@ -357,7 +390,7 @@ def parse_gbk(lines):
 
             # Add all of the qualifiers for the feature
             for k, v in feature.qualifiers.items():
-                data[-1][k] = v
+                data[-1][k] = ", ".join(v) if isinstance(v, list) else v
 
     return pd.DataFrame(data)
 
@@ -461,7 +494,7 @@ def parse_org_name(filepath):
 def format_rebase_df(dirpath):
 
     # READ INPUT DATA FROM WORKING DIRECTORY
-    data, motif_annot = read_data(dirpath)
+    data, motif_annot, genome_annot = read_data(dirpath)
 
     # Make a DataFrame with the organism name added
     df = pd.concat(
@@ -481,10 +514,6 @@ def format_rebase_df(dirpath):
 
     # Add a single combined name to use for the display
     df = df.assign(
-        enzyme_name = df.apply(
-            format_enzyme_name,
-            axis=1
-        ),
         text = df.apply(
             format_rebase_text,
             axis=1
@@ -494,7 +523,7 @@ def format_rebase_df(dirpath):
     # Transform to a wide DataFrame containing floats for `percent_detected`
     percent_detected = df.pivot(
         index="organism",
-        columns="enzyme_name",
+        columns="rec_seq",
         values="percent_detected"
     ).fillna(
         0
@@ -505,7 +534,7 @@ def format_rebase_df(dirpath):
     # Also make a wide table with the complete set of REBASE outputs
     text_df = df.pivot(
         index="organism",
-        columns="enzyme_name",
+        columns="rec_seq",
         values="text"
     ).fillna(
         ""
@@ -514,31 +543,27 @@ def format_rebase_df(dirpath):
         columns=percent_detected.columns.values,
     )
 
-    return percent_detected, text_df, motif_annot
+    return percent_detected, text_df, motif_annot, genome_annot
 
 
-def format_enzyme_name(r):
+def format_enzyme_type_label(r):
     """Format the label of each motif from the REBASE TXT file."""
 
-    # All enzymes must have a rec_seq
-    assert not pd.isnull(r.get("rec_seq")), r
-
-    # Format the base name
-    enzyme_name = r.rec_seq
-
     # If the enzyme type is present
-    if not pd.isnull(r.get("enz_type")):
+    if pd.notnull(r.get("enz_type")):
 
-        # Add it to the label
-        enzyme_name = f"{enzyme_name} - Type {int(r.enz_type)}"
+        # And the subtype is present
+        if pd.notnull(r.get("sub_type")):
 
-        # If the subtype is present
-        if not pd.isnull(r.get("sub_type")):
+            # Make a combined label
+            return f"Type {int(r.enz_type)}{r.sub_type}"
 
-            # Add it to the label
-            enzyme_name = f"{enzyme_name}{r.sub_type}"
-
-    return enzyme_name
+        # Without the subtype
+        else:
+            return f"Type {int(r.enz_type)}"
+    
+    # Without any type information
+    return None
 
 
 def format_rebase_text(r):
@@ -571,60 +596,28 @@ def reordered_index(df, method="ward", metric="euclidean"):
         )
     )
 
-def format_enzyme_type(enzyme_name_list):
-    """Format the data to display a marginal annotation of enzyme type."""
-    
-    enzyme_type_list = [
-        f"Type {enzyme_name.rsplit(' - Type ', 1)[1]}" if " - Type " in enzyme_name else None
-        for enzyme_name in enzyme_name_list
-    ]
 
-    # Convert to numeric
-    enzyme_type_mapping = {
-        enzyme_type: enzyme_type if enzyme_type is None else i
-        for i, enzyme_type in enumerate(
-            pd.Series(
-                enzyme_type_list
-            ).drop_duplicates(
-            ).sort_values(
-            )
-        )
-    }
-    enzyme_ix_list = list(map(enzyme_type_mapping.get, enzyme_type_list))
-
-    return pd.DataFrame(
-        dict(
-            enzyme_type=enzyme_type_list,
-            ix=enzyme_ix_list,
-        ),
-        index=enzyme_name_list
-    )
-
-def format_display(plot_value_df, plot_text_df, motif_annot, user_inputs):
+def format_display(plot_value_df, plot_text_df, motif_annot, genome_annot, user_inputs):
     """Format the display."""
 
-    # Format the enzyme type key, which includes both the nicely-formatted
-    # text describing the enzyme type and subtype, as well as a numeric
-    # index which helps provide a color assignment in the plot
-    enzyme_annot_df = format_enzyme_type(
-        plot_value_df.columns.values
-    )
-
-    # Combine that table with any of the additional motif annotations available
-    for col_name, col_values in motif_annot.items():
-        enzyme_annot_df = enzyme_annot_df.assign(
-            **{
-                col_name: col_values
-            }
-        )
-
     # If the user wants to sort the enzymes by an annotation
-    if len(user_inputs["sort_enzymes_by"]) > 0:
+    if user_inputs["sort_motifs_by"] == "Motif Annotations":
+
+        assert len(user_inputs["annot_motifs_by"]) > 0, "Must specify motif annotations for sorting"
 
         # Sort the annotation table
-        enzyme_annot_df.sort_values(
-            by=user_inputs["sort_enzymes_by"],
-            inplace=True
+        enzyme_annot_df = motif_annot.reindex(
+            columns=user_inputs["annot_motifs_by"]
+        ).sort_values(
+            by=user_inputs["annot_motifs_by"]
+        )
+
+        # Only keep the motifs which are detected in >=1 genome
+        enzyme_annot_df = enzyme_annot_df.reindex(
+            index=[
+                i for i in enzyme_annot_df.index.values
+                if i in plot_value_df.columns.values
+            ]
         )
 
         # Reorder the display data to match
@@ -635,51 +628,93 @@ def format_display(plot_value_df, plot_text_df, motif_annot, user_inputs):
             columns=enzyme_annot_df.index.values
         )
 
-    # Set up a list of columns to annotate enzymes by
-    marginal_z_columns = ["ix"] + user_inputs["annot_enzymes_by"]
-    marginal_text_columns = ["enzyme_type"] + user_inputs["annot_enzymes_by"]
-    marginal_labels = ["Enzyme Type"] + user_inputs["annot_enzymes_by"]
+    # Otherwise, the annotations should be made to match the order of the genomes
+    else:
+        enzyme_annot_df = motif_annot.reindex(
+            columns=user_inputs["annot_motifs_by"] if len(user_inputs["annot_motifs_by"]) > 0 else ['none'],
+            index=plot_value_df.columns.values
+        )
 
-    # Set up the annotations which will be displayed in the margin
-    marginal_text = enzyme_annot_df.reindex(columns=marginal_text_columns)
+    # If the user wants to sort the genomes by an annotation
+    if user_inputs["sort_genomes_by"] == "Genome Annotations":
+
+        assert len(user_inputs["annot_genomes_by"]) > 0, "Must specify genome annotations for sorting"
+
+        # Sort the genome annotation table
+        genome_annot_df = genome_annot.reindex(
+            columns=user_inputs["annot_genomes_by"]
+        ).sort_values(
+            by=user_inputs["annot_genomes_by"]
+        )
+
+        # Only keep the genomes which have >=1 motif detected
+        genome_annot_df = genome_annot_df.reindex(
+            index=[
+                i for i in genome_annot_df.index.values
+                if i in plot_value_df.index.values
+            ]
+        )
+
+        # Reorder the display data to match
+        plot_value_df = plot_value_df.reindex(
+            index=genome_annot_df.index.values
+        )
+        plot_text_df = plot_text_df.reindex(
+            index=genome_annot_df.index.values
+        )
+
+    # Otherwise, the annotations should be made to match the order of the genomes
+    else:
+        genome_annot_df = genome_annot.reindex(
+            columns=user_inputs["annot_genomes_by"],
+            index=plot_value_df.index.values
+        )
 
     # For the colors, convert all values to numeric and scale to 0-1
-    marginal_z = enzyme_annot_df.reindex(
-        columns=marginal_z_columns
-    ).applymap(
-        lambda v: pd.to_numeric(v, errors="coerce")
-    ).apply(
-        lambda c: c - c.min() if pd.notnull(c.min()) else c
-    ).apply(
-        lambda c: c / c.max() if pd.notnull(c.max()) else c
+    enzyme_marginal_z = enzyme_annot_df.apply(
+        convert_text_to_scalar
+    )
+    genome_marginal_z = genome_annot_df.apply(
+        convert_text_to_scalar
     )
 
     # Set the fraction of the plot used for the marginal annotation
     # depending on the number of those annotations
-    annot_frac = 0.02 + (0.05 * float(len(marginal_labels)))
+    enzyme_annot_frac = min(0.5, 0.02 + (0.05 * float(len(user_inputs["annot_motifs_by"]))))
+    genome_annot_frac = min(0.5, 0.02 + (0.05 * float(len(user_inputs["annot_genomes_by"]))))
 
     # If the genomes are being displayed on the horizontal axis
     if user_inputs['genome_axis'] == "Columns":
 
-        # The subplots will be laid out side-by-side
-        nrows=1
-        ncols=2
-        domains=dict(
-            xaxis_domain=[annot_frac + 0.01, 1.0],
-            xaxis2_domain=[0, annot_frac - 0.01],
-            yaxis_domain=[0, 1.0],
-            yaxis_anchor="x2"
-        )
-
-        # Transpose the DataFrames
+        # Transpose the DataFrames with genome/motif values
         plot_value_df = plot_value_df.T
         plot_text_df = plot_text_df.T
 
-        # The marginal annotation will be vertical
-        marginal_x = marginal_labels
-        marginal_y = plot_value_df.index.values
-        marginal_z = marginal_z.values
-        marginal_text = marginal_text.values
+        # The enzyme marginal annotation will be on the rows
+        row_marginal_x = user_inputs["annot_motifs_by"]
+        row_marginal_y = plot_value_df.index.values
+        row_marginal_z = enzyme_marginal_z.values
+        row_marginal_text = enzyme_annot_df.values
+
+        # The genome marginal annotation will be on the columns
+        col_marginal_y = user_inputs["annot_genomes_by"]
+        col_marginal_x = plot_value_df.columns.values
+        col_marginal_z = genome_marginal_z.T.values
+        col_marginal_text = genome_annot_df.T.values
+
+        # Add a third row for the barplot
+        nrows=3
+        ncols=2
+
+        # The size of the marginal plots is driven by the number of annotations
+        column_widths = [enzyme_annot_frac, 1 - enzyme_annot_frac]
+        row_heights = [genome_annot_frac, 1 - genome_annot_frac, 0.1]
+
+        # Compute the data for the marginal barplot
+        bar_x = plot_value_df.columns.values
+        bar_y = (plot_value_df > 0).sum(axis=0)
+        bar_text = list(map(lambda i: f"{i[0]:,} motifs detected in {i[1]}", zip(bar_y, bar_x)))
+        bar_orientation = "v"
 
     # Otherwise
     else:
@@ -687,28 +722,45 @@ def format_display(plot_value_df, plot_text_df, motif_annot, user_inputs):
         # The genomes must be displayed on the vertical axis
         assert user_inputs['genome_axis'] == "Rows"
 
-        # The subplots will be laid out top-and-bottom
+        # The genome/motif data does not need to be transposed
+
+        # The enzyme marginal annotation will be on the columns
+        col_marginal_x = plot_value_df.columns.values
+        col_marginal_y = user_inputs["annot_motifs_by"]
+        col_marginal_z = enzyme_marginal_z.T.values
+        col_marginal_text = enzyme_annot_df.T.values
+
+        # The genome marginal annotation will be on the rows
+        row_marginal_x = user_inputs["annot_genomes_by"]
+        row_marginal_y = plot_value_df.index.values
+        row_marginal_z = genome_marginal_z.values
+        row_marginal_text = genome_annot_df.values
+
+        # Add a third column for the barplot
         nrows=2
-        ncols=1
-        domains=dict(
-            yaxis_domain=[annot_frac + 0.01, 1.0],
-            yaxis2_domain=[0, annot_frac - 0.01],
-            xaxis_domain=[0, 1.0],
-            xaxis_anchor="y2"
-        )
+        ncols=3
 
-        # The data does not need to be transposed
+        # The size of the marginal plots is driven by the number of annotations
+        row_heights = [enzyme_annot_frac, 1 - enzyme_annot_frac]
+        column_widths = [genome_annot_frac, 1 - genome_annot_frac, 0.1]
 
-        # The marginal annotation will be horizontal
-        marginal_x = plot_value_df.columns.values
-        marginal_y = marginal_labels
-        marginal_z = marginal_z.T.values
-        marginal_text = marginal_text.T.values
+        # Compute the data for the marginal barplot
+        bar_x = (plot_value_df > 0).sum(axis=1)
+        bar_y = plot_value_df.index.values
+        bar_text = list(map(lambda i: f"{i[0]:,} motifs detected in {i[1]}", zip(bar_x, bar_y)))
+        bar_orientation = "h"
 
     # Set up the figure
     fig = make_subplots(
         rows = nrows,
-        cols = ncols
+        cols = ncols,
+        vertical_spacing=0.01,
+        horizontal_spacing=0.01,
+        start_cell="bottom-left",
+        column_widths=column_widths,
+        row_heights=row_heights,
+        shared_xaxes=True,
+        shared_yaxes=True,
     )
 
     # Add the heatmap to the plot
@@ -719,22 +771,51 @@ def format_display(plot_value_df, plot_text_df, motif_annot, user_inputs):
             z=plot_value_df.values,
             colorscale=user_inputs["heatmap_cpal"],
             text=plot_text_df.values,
-            hoverinfo="text"
+            hoverinfo="text",
+            colorbar_title="Percent<br>Detection<br>of Motif"
         ),
-        row=1,
+        row=2,
+        col=2
+    )
+
+    # Add the marginal annotation on the rows
+    fig.append_trace(
+        go.Heatmap(
+            x=row_marginal_x,
+            y=row_marginal_y,
+            z=row_marginal_z,
+            colorscale=user_inputs["annot_cpal"],
+            text=row_marginal_text,
+            hoverinfo="text",
+            showscale=False,
+        ),
+        row=2,
         col=1
     )
 
-    # Add the marginal annotation of enzyme type
+    # Add the marginal annotation on the columns
     fig.append_trace(
         go.Heatmap(
-            x=marginal_x,
-            y=marginal_y,
-            z=marginal_z,
+            x=col_marginal_x,
+            y=col_marginal_y,
+            z=col_marginal_z,
             colorscale=user_inputs["annot_cpal"],
-            text=marginal_text,
+            text=col_marginal_text,
             hoverinfo="text",
-            showscale=False,
+            showscale=False
+        ),
+        row=1,
+        col=2
+    )
+
+    # Add the barplot with the number of motifs per genome
+    fig.append_trace(
+        go.Bar(
+            x=bar_x,
+            y=bar_y,
+            text=bar_text,
+            hoverinfo="text",
+            orientation=bar_orientation,
         ),
         row=nrows,
         col=ncols
@@ -745,12 +826,27 @@ def format_display(plot_value_df, plot_text_df, motif_annot, user_inputs):
         height=user_inputs['figure_height'],
         width=user_inputs['figure_width'],
         paper_bgcolor='rgba(0,0,0,0)',
-        plot_bgcolor='rgba(0,0,0,0)',
-        **domains
+        plot_bgcolor='rgba(0,0,0,0)'
     )
 
     # Return the figure
     return fig
+
+
+def convert_text_to_scalar(c):
+    """Take a column with text or strings and convert to values ranging 0-1."""
+
+    # Get the sorted list of values
+    unique_values = c.dropna().drop_duplicates().sort_values()
+    
+    # Assign each value to an index position
+    value_map = pd.Series(dict(zip(unique_values, range(len(unique_values)))))
+
+    # Set the maximum value at 1
+    value_map = value_map / value_map.max()
+
+    # Map NaN to 0
+    return c.apply(value_map.get)
 
 
 ####################
@@ -758,19 +854,23 @@ def format_display(plot_value_df, plot_text_df, motif_annot, user_inputs):
 ####################
 
 # FORMAT THE REBASE DATA
-value_df, text_df, motif_annot = format_rebase_df(os.getcwd())
+value_df, text_df, motif_annot, genome_annot = format_rebase_df(os.getcwd())
 
 # TITLE OF THE APP
 st.title('Epi-Pangenome Map')
 
 # SIDEBAR MENUS
 user_inputs = dict(
+    detail_genome=st.sidebar.selectbox(
+        "Show Details For",
+        list(value_df.index.values)
+    ),
     hidden_genomes=st.sidebar.multiselect(
         "Hide Genomes",
         list(value_df.index.values)
     ),
-    hidden_enzymes=st.sidebar.multiselect(
-        "Hide Enzymes",
+    hidden_motifs=st.sidebar.multiselect(
+        "Hide Motifs",
         list(value_df.columns.values)
     ),
     genome_axis=st.sidebar.radio(
@@ -778,13 +878,29 @@ user_inputs = dict(
         ["Rows", "Columns"],
         index=0
     ),
-    sort_enzymes_by=st.sidebar.multiselect(
-        "Sort Enzymes By",
-        motif_annot.columns.values
+    sort_genomes_by=st.sidebar.selectbox(
+        "Sort Genomes By",
+        [
+            "Motif Presence/Absence",
+            "Genome Annotations"
+        ]
     ),
-    annot_enzymes_by=st.sidebar.multiselect(
-        "Annotate Enzymes By",
-        motif_annot.columns.values
+    annot_genomes_by=st.sidebar.multiselect(
+        "Annotate Genomes By",
+        genome_annot.columns.values,
+        []
+    ),
+    sort_motifs_by=st.sidebar.selectbox(
+        "Sort Motifs By",
+        [
+            "Genome Presence/Absence",
+            "Motif Annotations"
+        ]
+    ),
+    annot_motifs_by=st.sidebar.multiselect(
+        "Annotate Motifs By",
+        motif_annot.columns.values,
+        ["type_label"]
     ),
     heatmap_cpal=st.sidebar.selectbox(
         "Heatmap Color Palette",
@@ -830,8 +946,8 @@ user_inputs = dict(
 
 # MASK ANY SELECTED ROWS/COLUMNS
 plot_value_df = value_df.drop(
-    columns=user_inputs['hidden_enzymes'],
-    index=user_inputs['hidden_genomes'],
+    columns=user_inputs['hidden_motifs'],
+    index=user_inputs['hidden_genomes']
 )
 
 # MASK ANY MOTIFS WHICH DO NOT REACH THE MINIMUM THRESHOLD
@@ -867,13 +983,384 @@ plot_text_df = text_df.reindex(
     columns=plot_value_df.columns.values
 )
 
-# MAKE THE PLOT
+# MAKE THE MOTIF SUMMARY PLOT
 logging.info(f"Plotting {plot_value_df.shape[0]:,} genomes and {plot_value_df.shape[1]:,} enzymes")
 st.write(
     format_display(
         plot_value_df,
         plot_text_df,
         motif_annot,
+        genome_annot,
         user_inputs
+    )
+)
+
+# FUNCTION TO FORMAT A DATAFRAME FOR PLOTTING WITH PLOTLY BARPOLAR
+def format_bar_df(gbk, fasta, rebase):
+
+    # Map which annotations go into the same track
+    annot_type_dict = dict(
+        gene="gene",
+        CDS="CDS",
+        tRNA="RNA",
+        rRNA="RNA",
+        ncRNA="RNA",
+        tmRNA="RNA"
+    )
+
+    # The final set of output will have the same set of columns
+    bar_df = pd.DataFrame(
+        columns=[
+            "start",
+            "width",
+            "track",
+            "color",
+            "hover_name",
+        ]
+    )
+
+    # If we have genbank annotations
+    if gbk is not None:
+
+        # Add a column which lets us separate annotation types
+        gbk = gbk.assign(
+            track = gbk["type"].apply(
+                annot_type_dict.get
+            )
+        )
+
+        # Get the length of each contig
+        contig_len = gbk.groupby(
+            "record_id"
+        )["end"].max()
+
+        # Assign global coordinates using an offset
+        contig_offset = contig_len.cumsum() - contig_len
+        gbk = gbk.assign(
+            start = gbk.apply(
+                lambda r: min(r['start'], r['end']) + contig_offset[r['record_id']],
+                axis=1
+            ),
+            width = gbk.apply(
+                lambda r: abs(r['start'] - r['end']),
+                axis=1
+            )
+        )
+
+        # Remove any records which span entire contigs
+        gbk = gbk.loc[
+            gbk.apply(
+                lambda r: r['width'] < contig_len[r['record_id']],
+                axis=1
+            )
+        ]
+
+        # Add the annotations to the data used for the plot
+        bar_df = pd.concat([
+            bar_df,
+            gbk.assign(
+                color=1.,
+                # Hover name
+                hover_name=lambda d: d.apply(
+                    format_gbk_hover_name,
+                    axis=1
+                )
+            ).reindex(
+                columns=bar_df.columns.values
+            ).dropna()
+        ])
+
+    # If we have motif information and the genome sequence
+    if rebase is not None and fasta is not None:
+
+        # Iterate over each motif
+        for _, r in rebase.iterrows():
+
+            # Only consider rows which have recognition sequences
+            if pd.isnull(r.get("rec_seq")):
+                continue
+
+            # If this enzyme is in the list of enzymes to skip
+            if r["rec_seq"] in user_inputs["hidden_motifs"]:
+
+                # Skip it
+                continue
+            
+            # Add a track for this particular motif
+            bar_df = pd.concat([
+                bar_df,
+                format_motif_genome_track(
+                    r,
+                    fasta
+                )
+            ])
+
+    # If we have the genome sequence
+    if fasta is not None:
+
+        # Add the GC content
+        # Add a track for this particular motif
+        bar_df = pd.concat([
+            bar_df,
+            format_gc_track(fasta)
+        ])
+
+
+    return bar_df
+
+
+def expand_reverse_complement(nucl_str):
+    # Get the reverse complement
+    rc_str = str(Seq(nucl_str).reverse_complement())
+    
+    # If the sequence is a palendrome
+    if rc_str == nucl_str:
+
+        # Only check for it once
+        return [(nucl_str, "")]
+
+    # If the sequence is not a palendrom
+    else:
+
+        # Check for both the forward and the reverse
+        return [
+            (nucl_str, " (+)"),
+            (rc_str, " (-)")
+        ]
+
+def format_motif_genome_track(r, fasta, window_size=1000):
+    """Format a summary of the density of a particular motif along the genome."""
+
+    logging.info(f"Calculating frequency of {r.rec_seq}")
+
+    # Populate a list of dicts
+    output = []
+
+    # Keep track of the offset while iterating over contigs
+    offset = 0
+
+    # Iterate over each contig
+    for contig_seq in fasta.values():
+
+        # Add a record for each position where the motif matches
+        output.extend([
+            # Record the position of the match
+            {
+                "pos": match.start() + offset,
+                "strand": strand
+            }
+            # Iterate over each of the possible sequences which match this motif
+            for nucl_str in expand_ambiguous_nucleotides(r.rec_seq)
+            # Check both the forward and reverse strand
+            for query_str, strand in expand_reverse_complement(nucl_str)
+            # Iterate over each position where the sequence matches
+            for match in re.finditer(query_str, contig_seq.upper())
+        ])
+
+        # Add to the offset for the next contig
+        offset += len(contig_seq)
+
+    # Make a DataFrame
+    output = pd.DataFrame(output)
+
+    # Get the index of each window
+    output = output.assign(
+        window = output.pos.apply(lambda v: int(v / window_size))
+    )
+
+    # Get the total number of windows
+    n_windows = int(offset / window_size)
+
+    # Calculate the proportion of matches per window
+    output = pd.concat([
+        pd.DataFrame(dict(
+            n=strand_df.groupby("window").apply(len),
+        )).reindex(
+            index=list(range(n_windows))
+        ).fillna(
+            0
+        ).assign(
+            track=f"{r.rec_seq}{strand}",
+            strand=strand
+        )
+        for strand, strand_df in output.groupby("strand")
+    ]).reset_index()
+
+    # Format the output for the barplot
+    output = output.assign(
+        # Transform the `window` index to a `start` and `width`
+        start=output.window * window_size,
+        width=window_size,
+        # The `hover_name` will show the number of matches inside the window
+        hover_name=output.apply(
+            lambda r: f"{int(r.n):,} {'matches' if r.n > 1 else 'match'} in a {window_size:,}bp window",
+            axis=1
+        ),
+        # Scale the color to the maximum for this motif
+        color=output.n / output.n.max()
+    ).query(
+        "n > 0"
+    )
+
+    return output.reindex(
+        columns=[
+            "start",
+            "width",
+            "hover_name",
+            "color",
+            "track"
+        ]
+    )
+
+
+@st.cache
+def format_gc_track(fasta, window_size=1000):
+    """Format a summary of GC content along the genome."""
+
+    logging.info(f"Calculating GC content")
+
+    # Populate a list of dicts
+    output = []
+
+    # Keep track of the offset while iterating over contigs
+    offset = 0
+
+    # Iterate over each contig
+    for contig_seq in fasta.values():
+
+        # Add a record for each position where the motif matches
+        output.extend([
+            # Record the position of the match
+            {
+                "pos": match.start() + offset,
+            }
+            # Iterate over each position where the sequence matches
+            for match in re.finditer("[GC]", contig_seq.upper())
+        ])
+
+        # Add to the offset for the next contig
+        offset += len(contig_seq)
+
+    # Make a DataFrame
+    output = pd.DataFrame(output)
+
+    # Get the index of each window
+    output = output.assign(
+        window = output.pos.apply(lambda v: int(v / window_size))
+    )
+
+    # Get the total number of windows
+    n_windows = int(offset / window_size)
+
+    # Calculate the proportion of matches per window
+    output = pd.concat([
+        pd.DataFrame(dict(
+            n=output.groupby("window").apply(len),
+        )).reindex(
+            index=list(range(n_windows))
+        ).fillna(
+            0
+        )
+    ]).reset_index()
+
+    # Format the output for the barplot
+    output = output.assign(
+        # Transform the `window` index to a `start` and `width`
+        start=output.window * window_size,
+        width=window_size,
+        # The `hover_name` will show the GC content inside the window
+        hover_name=output.apply(
+            lambda r: f"{round(100. * r.n / window_size, 1)}% GC",
+            axis=1
+        ),
+        # Scale the color to the maximum for this motif
+        color=output.n / output.n.max(),
+        track="GC Content"
+    )
+
+    return output.reindex(
+        columns=[
+            "start",
+            "width",
+            "hover_name",
+            "color",
+            "track"
+        ]
+    )
+
+def expand_ambiguous_nucleotides(rec_seq):
+    """For a sequence with ambiguous nucleotides, find all the possible exact matches."""
+
+    # Make sure the sequence is uppercase
+    rec_seq = rec_seq.upper()
+
+    # Make a list of lists with each of the possibilities at each position
+    all_possible = [
+        list("." if i == "N" else ambiguous_dna_values[i])
+        for i in rec_seq
+    ]
+
+    # Make a list of index positions
+    for i in product(*all_possible):
+        yield ''.join(i)
+
+
+def format_gbk_hover_name(r):
+    """Format the hover text for each annotation."""
+
+    # Locus, contig, position
+    hover_name = f"{r.locus_tag}<br>{r.record_id}: {r.start:,} - {r.end:,}"
+
+    # Additional annotations
+    for k in ['product', 'product_id']:
+        if pd.notnull(r.get(k)):
+            hover_name = f"{hover_name}<br>{r[k]}"
+
+    return hover_name
+
+
+# FUNCTION TO RENDER THE GENOME ANNOTATION PLOT
+def format_genome_map(genome_name, dirpath):
+
+    # READ INPUT DATA FROM WORKING DIRECTORY
+    data, motif_annot, genome_annot = read_data(dirpath)
+
+    # Format a DataFrame which displays the annotations in concentric circles
+    bar_df = format_bar_df(
+        data[genome_name].get('gbk'),
+        data[genome_name].get('fasta'),
+        data[genome_name].get('rebase'),
+    )
+
+    fig = go.Figure(
+        go.Bar(
+            base=bar_df["start"],
+            x=bar_df["width"],
+            y=bar_df["track"],
+            marker_color=bar_df["color"],
+            marker_line_width=0,
+            text=bar_df["hover_name"],
+            hoverinfo="text",
+            orientation="h",
+            marker_colorscale="blues",
+        )   
+    )
+
+    fig.update_layout(
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        width=700,
+        height=700,
+        title=genome_name,
+    )
+
+    return fig
+
+# MAKE THE GENOME ANNOTATION PLOT
+logging.info(f"Plotting {user_inputs['detail_genome']}")
+st.write(
+    format_genome_map(
+        user_inputs['detail_genome'],
+        os.getcwd()
     )
 )
