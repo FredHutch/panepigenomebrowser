@@ -864,7 +864,7 @@ st.title('Epi-Pangenome Map')
 user_inputs = dict(
     detail_genome=st.sidebar.selectbox(
         "Show Details For",
-        list(value_df.index.values)
+        list(value_df.index.values) + ["None"]
     ),
     hidden_genomes=st.sidebar.multiselect(
         "Hide Genomes",
@@ -1358,10 +1358,13 @@ def format_genome_map(genome_name, dirpath):
     return fig
 
 # MAKE THE GENOME ANNOTATION PLOT
-logging.info(f"Plotting {user_inputs['detail_genome']}")
-st.write(
-    format_genome_map(
-        user_inputs['detail_genome'],
-        os.getcwd()
+if user_inputs['detail_genome'] != "None":
+    logging.info(f"Plotting {user_inputs['detail_genome']}")
+    st.write(
+        format_genome_map(
+            user_inputs['detail_genome'],
+            os.getcwd()
+        )
     )
-)
+else:
+    logging.info("User has opted to omit the genome detail display")
