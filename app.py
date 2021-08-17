@@ -110,7 +110,8 @@ def read_data(
                 "complete_genome",
                 "enz_comment",
                 "enz_name"
-            ]
+            ],
+            errors="ignore"
         )
         for org, org_data in output.items()
         if 'rebase' in org_data
