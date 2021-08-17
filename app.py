@@ -415,6 +415,9 @@ def parse_rebase(lines):
     enzymes = list()
     enzyme = dict()
 
+    # Keep track of the recognition sequences which have been detected thus far
+    added_rec_seqs = set()
+
     # Iterate over each line
     for line in lines:
 
@@ -436,8 +439,14 @@ def parse_rebase(lines):
             # If the current enzyme has content
             if len(enzyme) > 0:
 
-                # Add it to the list
-                enzymes.append(enzyme)
+                # If the recognition sequence is new
+                if "rec_seq" in enzyme and enzyme["rec_seq"] not in added_rec_seqs:
+
+                    # Add it to the list
+                    enzymes.append(enzyme)
+
+                    # Record that we've added this recognition sequence
+                    added_rec_seqs.add(enzyme["rec_seq"])
 
             # Start a new blank entry for the next enzyme
             enzyme = dict()
@@ -464,8 +473,11 @@ def parse_rebase(lines):
     # If there is a field remaining
     if len(enzyme) > 0:
 
-        # Add it to the list
-        enzymes.append(enzyme)
+        # If the recognition sequence is new
+        if "rec_seq" in enzyme and enzyme["rec_seq"] not in added_rec_seqs:
+
+            # Add it to the list
+            enzymes.append(enzyme)
 
     # Reformat the list of enzymes as a DataFrame
     return pd.DataFrame(enzymes)
