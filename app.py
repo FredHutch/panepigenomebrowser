@@ -41,6 +41,8 @@ def read_data(
         # Iterate over each file
         for filename in filenames:
 
+            logging.info(f"Considering {filename}")
+
             # If this is a CSV, then it may be a motif or annotation table
             if filename.endswith('.csv'):
 
@@ -240,6 +242,8 @@ def parse_file(filepath, ignored_ext=('.zip', '.sh', '.DS_Store', ".docx")):
 def parse_zip(archivepath, ignored_ext=('.zip', '.sh', '.DS_Store', ".docx")):
     """Parse the contents of a zip archive."""
 
+    logging.info(f"Parsing data from ZIP archive: {archivepath}")
+
     # Make sure that the file exists
     assert os.path.exists(archivepath), f"Archive not found: {archivepath}"
 
@@ -253,6 +257,15 @@ def parse_zip(archivepath, ignored_ext=('.zip', '.sh', '.DS_Store', ".docx")):
         # Iterate over each file in the archive
         for filepath in myzip.namelist():
             logging.info(f"Parsing {filepath} from archive")
+
+            # If this path is pointing to a folder inside the archive
+            if filepath.endswith('/'):
+
+                # Log it
+                logging.info("This path appears to point to a folder, skipping")
+
+                # Skip it
+                continue
 
             # Parse the organism name from the filepath
             org_name = parse_org_name(filepath)
@@ -1309,11 +1322,20 @@ def expand_ambiguous_nucleotides(rec_seq):
 def format_gbk_hover_name(r):
     """Format the hover text for each annotation."""
 
-    # Locus, contig, position
-    hover_name = f"{r.locus_tag}<br>{r.record_id}: {r.start:,} - {r.end:,}"
+    # If there is no locus_tag
+    if pd.isnull(r.__dict__.get("locus_tag")):
+
+        # Show the contig and position
+        hover_name = f"{r.record_id}: {r.start:,} - {r.end:,}"
+
+    # If there IS a locus tag
+    else:
+
+        # Show the locus, contig, and position
+        hover_name = f"{r.locus_tag}<br>{r.record_id}: {r.start:,} - {r.end:,}"
 
     # Additional annotations
-    for k in ['product', 'product_id']:
+    for k in ['product', 'product_id', 'db_xref']:
         if pd.notnull(r.get(k)):
             hover_name = f"{hover_name}<br>{r[k]}"
 
