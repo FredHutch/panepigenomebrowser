@@ -128,6 +128,8 @@ def read_data(
     ).reset_index(
     ).drop(
         columns=["level_1"]
+    ).assign(
+        motif_length = lambda d: d.rec_seq.apply(len)
     ).set_index("rec_seq")
 
     # Now add in any additional annotations provided by the user
