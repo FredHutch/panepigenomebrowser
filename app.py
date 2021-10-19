@@ -181,8 +181,42 @@ def read_data(
                     }
                 )
 
+    # Add in a record indicating whether each type of enzyme was found
+    genome_annot = annotate_genome_has_enzyme_type(genome_annot, output)
+    print(genome_annot)
+
     # Return the dict of all data, along with the additional motif annotations, if any
     return output, motif_annot, genome_annot
+
+
+def annotate_genome_has_enzyme_type(genome_annot, data):
+
+    # Make a record of whether each genome has each type of enzyme
+    genome_has_enzyme = defaultdict(dict)
+
+    # Iterate over the genomes
+    for org, org_data in data.items():
+
+        # Iterate over each enzyme
+        for enz_type in org_data['rebase']['enz_type'].dropna().apply(int).apply(str).values:
+
+            # Note that this genome has this enzyme
+            genome_has_enzyme[enz_type][org] = True
+
+    # Iterate over each of the enzyme types found across all genomes
+    for enz_type, genome_presence_vector in genome_has_enzyme.items():
+
+        # Add an annnotation for this enzyme
+        genome_annot = genome_annot.assign(
+            **{
+                f"Has Enzyme Type {enz_type}": [
+                    genome_presence_vector.get(genome_id, False)
+                    for genome_id in genome_annot.index.values
+                ]
+            }
+        )
+
+    return genome_annot
 
 
 @st.cache
