@@ -730,19 +730,25 @@ def format_display(plot_value_df, plot_text_df, motif_annot, genome_annot, user_
         col_marginal_z = genome_marginal_z.T.values
         col_marginal_text = genome_annot_df.T.values
 
-        # Add a third row for the barplot
-        nrows=3
-        ncols=2
+        # Compute the data for the genome-marginal barplot
+        genome_bar_x = plot_value_df.columns.values
+        genome_bar_y = (plot_value_df > 0).sum(axis=0)
+        genome_bar_text = list(map(lambda i: f"{i[0]:,} motifs detected in {i[1]}", zip(genome_bar_y, genome_bar_x)))
+        genome_bar_orientation = "v"
 
-        # The size of the marginal plots is driven by the number of annotations
-        column_widths = [enzyme_annot_frac, 1 - enzyme_annot_frac]
-        row_heights = [genome_annot_frac, 1 - genome_annot_frac, 0.1]
+        # Place the genome-marginal barplot in the layout
+        genome_bar_nrows = 3
+        genome_bar_ncols = 2
 
-        # Compute the data for the marginal barplot
-        bar_x = plot_value_df.columns.values
-        bar_y = (plot_value_df > 0).sum(axis=0)
-        bar_text = list(map(lambda i: f"{i[0]:,} motifs detected in {i[1]}", zip(bar_y, bar_x)))
-        bar_orientation = "v"
+        # Compute the data for the motif-marginal barplot
+        motif_bar_x = (plot_value_df > 0).sum(axis=1)
+        motif_bar_y = plot_value_df.index.values
+        motif_bar_text = list(map(lambda i: f"Motif {i[0]} detected in {i[1]:,} genomes", zip(motif_bar_y, motif_bar_x)))
+        motif_bar_orientation = "h"
+
+        # Place the motif-marginal barplot in the layout
+        motif_bar_nrows = 2
+        motif_bar_ncols = 3
 
     # Otherwise
     else:
@@ -764,24 +770,34 @@ def format_display(plot_value_df, plot_text_df, motif_annot, genome_annot, user_
         row_marginal_z = genome_marginal_z.values
         row_marginal_text = genome_annot_df.values
 
-        # Add a third column for the barplot
-        nrows=2
-        ncols=3
-
-        # The size of the marginal plots is driven by the number of annotations
-        row_heights = [enzyme_annot_frac, 1 - enzyme_annot_frac]
-        column_widths = [genome_annot_frac, 1 - genome_annot_frac, 0.1]
-
         # Compute the data for the marginal barplot
-        bar_x = (plot_value_df > 0).sum(axis=1)
-        bar_y = plot_value_df.index.values
-        bar_text = list(map(lambda i: f"{i[0]:,} motifs detected in {i[1]}", zip(bar_x, bar_y)))
-        bar_orientation = "h"
+        genome_bar_x = (plot_value_df > 0).sum(axis=1)
+        genome_bar_y = plot_value_df.index.values
+        genome_bar_text = list(map(lambda i: f"{i[0]:,} motifs detected in {i[1]}", zip(genome_bar_x, genome_bar_y)))
+        genome_bar_orientation = "h"
+
+        # Place the genome-marginal barplot in the layout
+        genome_bar_nrows = 2
+        genome_bar_ncols = 3
+
+        # Compute the data for the motif-marginal barplot
+        motif_bar_x = plot_value_df.columns.values
+        motif_bar_y = (plot_value_df > 0).sum(axis=0)
+        motif_bar_text = list(map(lambda i: f"Motif {i[0]} detected in {i[1]:,} genomes", zip(motif_bar_x, motif_bar_y)))
+        motif_bar_orientation = "v"
+
+        # Place the motif-marginal barplot in the layout
+        motif_bar_nrows = 3
+        motif_bar_ncols = 2
+
+    # The size of the marginal plots is driven by the number of annotations
+    row_heights = [enzyme_annot_frac, 1 - enzyme_annot_frac, 0.1]
+    column_widths = [genome_annot_frac, 1 - genome_annot_frac, 0.1]
 
     # Set up the figure
     fig = make_subplots(
-        rows = nrows,
-        cols = ncols,
+        rows = 3,
+        cols = 3,
         vertical_spacing=0.01,
         horizontal_spacing=0.01,
         start_cell="bottom-left",
@@ -839,15 +855,31 @@ def format_display(plot_value_df, plot_text_df, motif_annot, genome_annot, user_
     # Add the barplot with the number of motifs per genome
     fig.append_trace(
         go.Bar(
-            x=bar_x,
-            y=bar_y,
-            text=bar_text,
+            x=genome_bar_x,
+            y=genome_bar_y,
+            text=genome_bar_text,
             hoverinfo="text",
-            orientation=bar_orientation,
+            orientation=genome_bar_orientation,
             marker_color="blue",
+            showlegend=False,
         ),
-        row=nrows,
-        col=ncols
+        row=genome_bar_nrows,
+        col=genome_bar_ncols
+    )
+
+    # Add the barplot with the number of genomes per motif
+    fig.append_trace(
+        go.Bar(
+            x=motif_bar_x,
+            y=motif_bar_y,
+            text=motif_bar_text,
+            hoverinfo="text",
+            orientation=motif_bar_orientation,
+            marker_color="blue",
+            showlegend=False,
+        ),
+        row=motif_bar_nrows,
+        col=motif_bar_ncols
     )
 
     # Set up the size of the figure
