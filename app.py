@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import base64
 from Bio.Data.IUPACData import ambiguous_dna_values
 from Bio.Seq import Seq
 from Bio.SeqIO.FastaIO import SimpleFastaParser
@@ -1089,6 +1090,37 @@ st.write(
         user_inputs
     )
 )
+
+@st.cache
+def get_table_download_link():
+    """Generates a link allowing the data in a given panda dataframe to be downloaded
+    in:  dataframe
+    out: href string
+    """
+
+    # READ INPUT DATA FROM WORKING DIRECTORY
+    data, motif_annot, genome_annot = read_data(os.getcwd())
+
+    # Make a single table with the parsed rebase data
+    rebase_df = pd.concat([
+        genome_dat['rebase']
+        for genome_dat in data.values()
+    ])
+
+    # Format as a CSV
+    csv = rebase_df.to_csv(index=False)
+    # some strings <-> bytes conversions necessary here
+    b64 = base64.b64encode(csv.encode()).decode()
+
+    # Format the reference
+    href = f'<a href="data:file/csv;base64,{b64}" download="rebase_data.csv">Download Table as CSV</a>'
+
+    return href
+
+
+# SHOW A LINK FOR DOWNLOADING THE DATA IN TABULAR FORMAT
+st.markdown(get_table_download_link(), unsafe_allow_html=True)
+
 
 # FUNCTION TO FORMAT A DATAFRAME FOR PLOTTING WITH PLOTLY BARPOLAR
 def format_bar_df(gbk, fasta, rebase):
