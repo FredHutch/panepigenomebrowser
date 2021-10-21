@@ -198,11 +198,14 @@ def annotate_genome_has_enzyme_type(genome_annot, data):
     # Iterate over the genomes
     for org, org_data in data.items():
 
-        # Iterate over each enzyme
-        for enz_type in org_data['rebase']['enz_type'].dropna().apply(int).apply(str).values:
+        # If there is information on enzyme type for this organism
+        if 'enz_type' in org_data['rebase'].columns.values:
 
-            # Note that this genome has this enzyme
-            genome_has_enzyme[enz_type][org] = True
+            # Iterate over each enzyme
+            for enz_type in org_data['rebase']['enz_type'].dropna().apply(int).apply(str).values:
+
+                # Note that this genome has this enzyme
+                genome_has_enzyme[enz_type][org] = True
 
     # Iterate over each of the enzyme types found across all genomes
     for enz_type, genome_presence_vector in genome_has_enzyme.items():
